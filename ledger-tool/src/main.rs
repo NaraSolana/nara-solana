@@ -1443,6 +1443,19 @@ fn main() {
                         .help("Remove all existing stake accounts from the new snapshot"),
                 )
                 .arg(
+                    Arg::with_name("accounts_to_add")
+                        .required(false)
+                        .long("add-accounts-file")
+                        .takes_value(true)
+                        .value_name("FILE")
+                        .help(
+                            "Path to a JSON file containing a map of accounts to inject into \
+                             the snapshot. Format: {\"<PUBKEY>\": {\"balance\": <u64>, \"owner\": \
+                             \"<PUBKEY>\", \"data\": \"<base64>\", \"executable\": <bool>}, ...}. \
+                             The `rent_epoch` field is optional (defaults to 0).",
+                        ),
+                )
+                .arg(
                     Arg::with_name("incremental")
                         .long("incremental")
                         .takes_value(false)
@@ -2046,6 +2059,76 @@ fn main() {
                         pubkeys_of(arg_matches, "bootstrap_validator");
                     let accounts_to_remove =
                         pubkeys_of(arg_matches, "accounts_to_remove").unwrap_or_default();
+                    let accounts_to_add: Vec<(Pubkey, AccountSharedData)> = arg_matches
+                        .value_of("accounts_to_add")
+                        .map(|path| {
+                            let contents = std::fs::read_to_string(path).unwrap_or_else(|e| {
+                                eprintln!("Error reading accounts file {path}: {e}");
+                                exit(1);
+                            });
+                            let map: serde_json::Map<String, serde_json::Value> =
+                                serde_json::from_str(&contents).unwrap_or_else(|e| {
+                                    eprintln!("Error parsing accounts file {path}: {e}");
+                                    exit(1);
+                                });
+                            use base64::{engine::general_purpose, Engine as _};
+                            map.into_iter()
+                                .map(|(pubkey_str, account)| {
+                                    let pubkey = pubkey_str.parse::<Pubkey>().unwrap_or_else(|e| {
+                                        eprintln!("Invalid pubkey `{pubkey_str}`: {e}");
+                                        exit(1);
+                                    });
+                                    let lamports = account
+                                        .get("balance")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or_else(|| {
+                                            eprintln!("Missing `balance` for {pubkey_str}");
+                                            exit(1);
+                                        });
+                                    let owner = account
+                                        .get("owner")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_else(|| {
+                                            eprintln!("Missing `owner` for {pubkey_str}");
+                                            exit(1);
+                                        })
+                                        .parse::<Pubkey>()
+                                        .unwrap_or_else(|e| {
+                                            eprintln!("Invalid owner for {pubkey_str}: {e}");
+                                            exit(1);
+                                        });
+                                    let executable = account
+                                        .get("executable")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false);
+                                    let rent_epoch = account
+                                        .get("rent_epoch")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+                                    let data_bytes = match account.get("data") {
+                                        Some(serde_json::Value::String(s)) => general_purpose::STANDARD
+                                            .decode(s)
+                                            .unwrap_or_else(|e| {
+                                                eprintln!(
+                                                    "Invalid base64 data for {pubkey_str}: {e}"
+                                                );
+                                                exit(1);
+                                            }),
+                                        None => Vec::new(),
+                                        _ => {
+                                            eprintln!("Invalid `data` for {pubkey_str}");
+                                            exit(1);
+                                        }
+                                    };
+                                    let mut acct = AccountSharedData::new(lamports, 0, &owner);
+                                    acct.set_executable(executable);
+                                    acct.set_rent_epoch(rent_epoch);
+                                    acct.set_data_from_slice(&data_bytes);
+                                    (pubkey, acct)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     let feature_gates_to_deactivate =
                         pubkeys_of(arg_matches, "feature_gates_to_deactivate").unwrap_or_default();
                     let vote_accounts_to_destake: HashSet<_> =
@@ -2189,6 +2272,7 @@ fn main() {
                         || hashes_per_tick.is_some()
                         || remove_stake_accounts
                         || !accounts_to_remove.is_empty()
+                        || !accounts_to_add.is_empty()
                         || !feature_gates_to_deactivate.is_empty()
                         || !vote_accounts_to_destake.is_empty()
                         || faucet_pubkey.is_some()
@@ -2278,6 +2362,17 @@ fn main() {
                         account.set_lamports(0);
                         bank.store_account(&address, &account);
                         debug!("Account removed: {address}");
+                    }
+
+                    for (pubkey, account) in &accounts_to_add {
+                        bank.store_account(pubkey, account);
+                        info!(
+                            "Account injected: {} (lamports={}, owner={}, data_len={})",
+                            pubkey,
+                            account.lamports(),
+                            account.owner(),
+                            account.data().len(),
+                        );
                     }
 
                     if !vote_accounts_to_destake.is_empty() {
