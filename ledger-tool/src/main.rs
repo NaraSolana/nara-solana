@@ -1336,6 +1336,37 @@ fn main() {
                         ),
                 )
                 .arg(
+                    Arg::with_name("reset_clock_to_wall_clock")
+                        .required(false)
+                        .long("reset-clock-to-wall-clock")
+                        .takes_value(false)
+                        .requires("warp_slot")
+                        .help(
+                            "Overwrite the Clock sysvar so that both `unix_timestamp` and \
+                             `epoch_start_timestamp` equal the operator's current wall-clock \
+                             time (UTC seconds since epoch) at the moment this command runs. \
+                             Only effective when combined with --warp-slot. Useful after a \
+                             hard fork where on-chain time has drifted beyond what the vote \
+                             timestamp drift correction can close (notably on short-epoch \
+                             clusters).",
+                        ),
+                )
+                .arg(
+                    Arg::with_name("reset_clock_timestamp")
+                        .required(false)
+                        .long("reset-clock-timestamp")
+                        .takes_value(true)
+                        .value_name("UNIX_TIMESTAMP")
+                        .requires("warp_slot")
+                        .conflicts_with("reset_clock_to_wall_clock")
+                        .help(
+                            "Same as --reset-clock-to-wall-clock but with an explicit UNIX \
+                             timestamp (seconds since epoch, UTC). Useful to pre-bake a \
+                             specific Clock value. Only effective when combined with \
+                             --warp-slot.",
+                        ),
+                )
+                .arg(
                     Arg::with_name("faucet_lamports")
                         .short("t")
                         .long("faucet-lamports")
@@ -2581,10 +2612,43 @@ fn main() {
                         // of order.
                         bank.squash();
                         bank.force_flush_accounts_cache();
-                        Arc::new(Bank::warp_from_parent(
+
+                        let clock_override = if arg_matches
+                            .is_present("reset_clock_to_wall_clock")
+                        {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_else(|e| {
+                                    eprintln!("Error: system clock before UNIX epoch: {e}");
+                                    exit(1);
+                                })
+                                .as_secs() as i64;
+                            info!(
+                                "Overriding Clock sysvar to wall-clock time: {now} \
+                                 (epoch_start_timestamp and unix_timestamp)"
+                            );
+                            Some(now)
+                        } else if let Some(ts_str) =
+                            arg_matches.value_of("reset_clock_timestamp")
+                        {
+                            let ts = ts_str.parse::<i64>().unwrap_or_else(|e| {
+                                eprintln!("Invalid --reset-clock-timestamp value: {e}");
+                                exit(1);
+                            });
+                            info!(
+                                "Overriding Clock sysvar to explicit timestamp: {ts} \
+                                 (epoch_start_timestamp and unix_timestamp)"
+                            );
+                            Some(ts)
+                        } else {
+                            None
+                        };
+
+                        Arc::new(Bank::warp_from_parent_with_clock_override(
                             bank.clone(),
                             bank.collector_id(),
                             warp_slot,
+                            clock_override,
                         ))
                     } else {
                         bank

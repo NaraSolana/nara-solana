@@ -1743,15 +1743,37 @@ impl Bank {
     /// * Adjusts the new bank's tick height to avoid having to run PoH for millions of slots
     /// * Freezes the new bank, assuming that the user will `Bank::new_from_parent` from this bank
     pub fn warp_from_parent(parent: Arc<Bank>, collector_id: &Pubkey, slot: Slot) -> Self {
+        Self::warp_from_parent_with_clock_override(parent, collector_id, slot, None)
+    }
+
+    /// Same as `warp_from_parent`, but optionally overrides the Clock sysvar's
+    /// `unix_timestamp` and `epoch_start_timestamp` with an explicit value.
+    ///
+    /// When `clock_timestamp_override` is `None` the behaviour matches the
+    /// historical `warp_from_parent` (i.e. both fields inherit the parent's
+    /// `unix_timestamp`).
+    ///
+    /// When `Some(ts)`, both fields are set to `ts`. This is useful for hard
+    /// forks where the operator wants to resynchronize on-chain time with
+    /// wall-clock time (the vote-timestamp drift correction cannot close a
+    /// gap larger than `fast_drift`, so for short epochs the only practical
+    /// fix is an explicit override at snapshot creation).
+    pub fn warp_from_parent_with_clock_override(
+        parent: Arc<Bank>,
+        collector_id: &Pubkey,
+        slot: Slot,
+        clock_timestamp_override: Option<UnixTimestamp>,
+    ) -> Self {
         parent.freeze();
         let parent_timestamp = parent.clock().unix_timestamp;
         let mut new = Bank::new_from_parent(parent, collector_id, slot);
         new.update_epoch_stakes(new.epoch_schedule().get_epoch(slot));
         new.tick_height.store(new.max_tick_height(), Relaxed);
 
+        let target_timestamp = clock_timestamp_override.unwrap_or(parent_timestamp);
         let mut clock = new.clock();
-        clock.epoch_start_timestamp = parent_timestamp;
-        clock.unix_timestamp = parent_timestamp;
+        clock.epoch_start_timestamp = target_timestamp;
+        clock.unix_timestamp = target_timestamp;
         new.update_sysvar_account(&sysvar::clock::id(), |account| {
             create_account(
                 &clock,
