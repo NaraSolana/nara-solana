@@ -1770,10 +1770,33 @@ impl Bank {
         new.update_epoch_stakes(new.epoch_schedule().get_epoch(slot));
         new.tick_height.store(new.max_tick_height(), Relaxed);
 
-        let target_timestamp = clock_timestamp_override.unwrap_or(parent_timestamp);
         let mut clock = new.clock();
-        clock.epoch_start_timestamp = target_timestamp;
-        clock.unix_timestamp = target_timestamp;
+        if let Some(target_unix_ts) = clock_timestamp_override {
+            // Align on-chain time with `target_unix_ts`.
+            //
+            // `epoch_start_timestamp` must be the wall-clock time at the start
+            // of the CURRENT epoch (not at this warp slot), because the vote
+            // timestamp drift correction uses
+            //   PoH_time = epoch_start_timestamp + (slot - first_slot_in_epoch) * slot_duration
+            // as its reference. If we naively set both fields to the same value,
+            // PoH_time runs into the future by the elapsed-epoch duration,
+            // forcing drift clamp to pull subsequent block_time ahead of wall
+            // clock by that same amount.
+            //
+            // So back-compute epoch_start_timestamp such that
+            //   epoch_start_timestamp + poh_offset == target_unix_ts
+            let first_slot_in_epoch = new
+                .epoch_schedule()
+                .get_first_slot_in_epoch(new.epoch_schedule().get_epoch(slot));
+            let slots_into_epoch = slot.saturating_sub(first_slot_in_epoch);
+            let poh_offset_ns = (slots_into_epoch as u128).saturating_mul(new.ns_per_slot);
+            let poh_offset_secs = (poh_offset_ns / 1_000_000_000u128) as i64;
+            clock.epoch_start_timestamp = target_unix_ts.saturating_sub(poh_offset_secs);
+            clock.unix_timestamp = target_unix_ts;
+        } else {
+            clock.epoch_start_timestamp = parent_timestamp;
+            clock.unix_timestamp = parent_timestamp;
+        }
         new.update_sysvar_account(&sysvar::clock::id(), |account| {
             create_account(
                 &clock,
